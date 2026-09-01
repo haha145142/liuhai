@@ -1,36 +1,38 @@
-"""Fund Watch - Vercel FastAPI entrypoint.
+"""Fund Watch FastAPI entrypoint for Vercel.
 
-The Vercel function stays stateless. If DATABASE_URL is configured, the
-read APIs use PostgreSQL; otherwise a clearly labelled demo dataset keeps
-the UI usable while infrastructure is being provisioned.
+The app is stateless. PostgreSQL is optional infrastructure: when
+DATABASE_URL is configured, persistent reads come from PostgreSQL. Without it,
+the UI remains usable with clearly labelled fallback data. Intraday estimates
+use the current TianTian Fund H5 valuation adapter when available.
 """
 from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
     import psycopg
-except Exception:  # pragma: no cover - dependency is present on Vercel
+except Exception:  # pragma: no cover
     psycopg = None
 
-app = FastAPI(title="Fund Watch API", version="0.2.0")
+from core.live_data import fetch_fund_valuations
+
+app = FastAPI(title="Fund Watch API", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
 DEMO_FUNDS = [
-    {"fund_code":"000961","fund_name":"天弘沪深300A","fund_type":"指数型","nav":1.0234,"estimated_nav":1.0311,"change_pct":0.75,"confidence":"高","source":"demo"},
-    {"fund_code":"519674","fund_name":"银河创新成长混合","fund_type":"混合型","nav":0.9842,"estimated_nav":0.9937,"change_pct":0.96,"confidence":"中","source":"demo"},
-    {"fund_code":"110022","fund_name":"易方达消费行业","fund_type":"股票型","nav":1.1865,"estimated_nav":1.1789,"change_pct":-0.64,"confidence":"中","source":"demo"},
+    {"fund_code":"000961","fund_name":"天弘沪深300A","fund_type":"指数型","nav":1.0234,"estimated_nav":1.0311,"change_pct":0.75,"confidence":"高"},
+    {"fund_code":"519674","fund_name":"银河创新成长混合","fund_type":"混合型","nav":0.9842,"estimated_nav":0.9937,"change_pct":0.96,"confidence":"中"},
+    {"fund_code":"110022","fund_name":"易方达消费行业","fund_type":"股票型","nav":1.1865,"estimated_nav":1.1789,"change_pct":-0.64,"confidence":"中"},
 ]
 
 DEMO_HOLDINGS = {
@@ -69,6 +71,8 @@ def _db_rows(query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     with psycopg.connect(url, connect_timeout=3) as conn:
         with conn.cursor() as cur:
             cur.execute(query, params)
+            if cur.description is None:
+                return []
             cols = [d.name for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -81,14 +85,31 @@ def _db_fund(code: str) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+def _fallback_fund(code: str) -> dict[str, Any] | None:
+    return next((x for x in DEMO_FUNDS if x["fund_code"] == code), None)
+
+
 @app.get("/api")
 def root() -> dict[str, Any]:
-    return {"name":"Fund Watch","version":"0.2.0","status":"ok","mode":"postgres" if os.getenv("DATABASE_URL") else "demo"}
+    return {"name":"Fund Watch","version":"0.3.0","status":"ok","mode":"postgres" if os.getenv("DATABASE_URL") else "demo"}
 
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"code":0,"status":"healthy","mode":"postgres" if os.getenv("DATABASE_URL") else "demo","time":_now()}
+    db_ok = False
+    if os.getenv("DATABASE_URL") and psycopg is not None:
+        try:
+            _db_rows("SELECT 1")
+            db_ok = True
+        except Exception:
+            db_ok = False
+    return {
+        "code":0,
+        "status":"healthy",
+        "mode":"postgres" if os.getenv("DATABASE_URL") else "demo",
+        "database":"ok" if db_ok else ("not_configured" if not os.getenv("DATABASE_URL") else "error"),
+        "time":_now(),
+    }
 
 
 @app.get("/api/funds")
@@ -98,24 +119,63 @@ def funds() -> dict[str, Any]:
         for r in rows:
             r["nav"] = float(r["nav"]) if r["nav"] is not None else None
             r["source"] = "postgres"
-        return {"code":0,"data":rows}
-    return {"code":0,"data":DEMO_FUNDS,"source":"demo"}
+        try:
+            live = fetch_fund_valuations([r["fund_code"] for r in rows])
+        except Exception:
+            live = {}
+        for r in rows:
+            r.update(live.get(r["fund_code"], {}))
+        return {"code":0,"data":rows,"source":"postgres"}
+
+    try:
+        live = fetch_fund_valuations([x["fund_code"] for x in DEMO_FUNDS])
+    except Exception:
+        live = {}
+    data = []
+    for item in DEMO_FUNDS:
+        merged = {**item, **live.get(item["fund_code"], {})}
+        merged["source"] = merged.get("source") or "demo"
+        if merged.get("provider_status") == "unavailable":
+            merged["source"] = "demo-no-intraday"
+        data.append(merged)
+    return {"code":0,"data":data,"source":"live-provider-or-demo"}
 
 
 @app.get("/api/funds/{fund_code}/estimate")
 def estimate(fund_code: str) -> dict[str, Any]:
     fund = _db_fund(fund_code)
-    for item in DEMO_FUNDS:
-        if item["fund_code"] == fund_code and fund is None:
-            return {"code":0,"data":{**item,"snapshot_time":_now()}}
+    try:
+        live = fetch_fund_valuations([fund_code]).get(fund_code, {})
+    except Exception as exc:
+        live = {"provider_error": str(exc)}
+
     if fund:
         nav = float(fund["nav"] or 0)
-        # P0 fallback until the live quote/holding collectors are wired.
+        if live.get("estimated_nav") is not None:
+            return {"code":0,"data":{
+                "fund_code":fund_code,
+                "fund_name":fund["fund_name"],
+                "fund_type":fund["fund_type"],
+                "latest_nav":live.get("latest_nav") or nav,
+                "estimated_nav":live["estimated_nav"],
+                "estimated_change_pct":live.get("estimated_change_pct"),
+                "valuation_time":live.get("valuation_time"),
+                "confidence":"数据源实时估值",
+                "source":live.get("source"),
+                "snapshot_time":_now(),
+            }}
         return {"code":0,"data":{
             "fund_code":fund_code,"fund_name":fund["fund_name"],"fund_type":fund["fund_type"],
-            "latest_nav":nav,"estimated_nav":nav,"estimated_change_pct":0.0,
-            "confidence":"待行情","source":"postgres","snapshot_time":_now(),
+            "latest_nav":nav,"estimated_nav":None,"estimated_change_pct":None,
+            "confidence":"暂无盘中估值","source":"postgres","snapshot_time":_now(),
         }}
+
+    fallback = _fallback_fund(fund_code)
+    if live and (live.get("estimated_nav") is not None or live.get("latest_nav") is not None):
+        base = {**(fallback or {}), **live, "source": live.get("source", "live-provider")}
+        return {"code":0,"data":{**base,"snapshot_time":_now()}}
+    if fallback:
+        return {"code":0,"data":{**fallback,"source":"demo","snapshot_time":_now()}}
     raise HTTPException(status_code=404, detail="基金不存在")
 
 
@@ -129,10 +189,12 @@ def holdings(fund_code: str) -> dict[str, Any]:
         for r in rows:
             r["weight"] = float(r["weight"])
             r["is_top_ten"] = bool(r["is_top_ten"])
-            r["report_date"] = r["report_date"].isoformat()
+            if r["report_date"] is not None:
+                r["report_date"] = r["report_date"].isoformat()
         return {"code":0,"data":rows,"source":"postgres"}
+    fallback = _fallback_fund(fund_code)
     data=[{"stock_code":c,"stock_name":n,"weight":w,"is_top_ten":True,"current_change_pct":chg} for c,n,w,chg in DEMO_HOLDINGS.get(fund_code,[])]
-    if not data and fund_code not in {x["fund_code"] for x in DEMO_FUNDS}:
+    if not data and not fallback:
         raise HTTPException(status_code=404, detail="基金不存在")
     return {"code":0,"data":data,"source":"demo"}
 
@@ -147,7 +209,7 @@ def contribution(fund_code: str) -> dict[str, Any]:
             industry = "电子/科技"
         elif h["stock_code"] in {"600519","000858","600887","000568"}:
             industry = "食品饮料"
-        groups[industry] = groups.get(industry,0.0) + float(h.get("weight",0))*float(h.get("current_change_pct",0))/100
+        groups[industry] = groups.get(industry,0.0) + float(h.get("weight",0))*float(h.get("current_change_pct",0) or 0)/100
     return {"code":0,"data":{"fund_code":fund_code,"industries":[{"industry_name":k,"contribution":round(v,4)} for k,v in sorted(groups.items(),key=lambda x:x[1],reverse=True)]}}
 
 
@@ -179,7 +241,7 @@ def watchlist(group_id: int) -> dict[str, Any]:
             data.append(estimate(c)["data"])
         except HTTPException:
             continue
-    avg = sum(float(x.get("estimated_change_pct",x.get("change_pct",0))) for x in data)/len(data) if data else 0
+    avg = sum(float(x.get("estimated_change_pct") or 0) for x in data)/len(data) if data else 0
     return {"code":0,"data":data,"summary":{"fund_count":len(data),"avg_change_pct":round(avg,4)}}
 
 
@@ -188,4 +250,4 @@ def cron_calibrate(authorization: str | None = Header(default=None)) -> dict[str
     secret = os.getenv("CRON_SECRET")
     if not secret or authorization != f"Bearer {secret}":
         raise HTTPException(status_code=401, detail="Unauthorized")
-    return {"code":0,"success":True,"message":"P0 calibration hook ready; connect official NAV collector next.","time":_now()}
+    return {"code":0,"success":True,"message":"Calibration hook ready; official NAV collector remains to be wired.","time":_now()}
