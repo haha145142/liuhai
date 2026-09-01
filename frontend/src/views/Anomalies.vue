@@ -1,0 +1,1 @@
+<template><div><header class="page-head"><div><div class="eyebrow">精度与异常</div><h1>调仓感知</h1><p>P0 先展示精度闭环，为后续回归监控预留入口</p></div></header><section class="glass empty"><div class="signal">●</div><h2>当前没有确认的异常调仓信号</h2><p>后续接入盘后官方净值校验、回归漂移检测后，这里将显示疑似持仓结构变化。</p><div class="chips"><span>精度均值 0.31%</span><span>模型 v1</span><span>状态：待数据闭环</span></div></section></div></template>
