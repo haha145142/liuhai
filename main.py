@@ -2,8 +2,8 @@
 
 Vercel's FastAPI integration treats a recognized root entrypoint as one
 serverless application, allowing FastAPI itself to route /api/* requests.
-The existing api.index app contains the API implementation; this wrapper
-makes it the canonical root entrypoint and serves the small frontend shell.
+The existing api.index app contains the core API implementation; auxiliary
+P0 product routes are registered via a side-effect import below.
 """
 from pathlib import Path
 
@@ -11,6 +11,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.index import app
+
+# Register the expanded P0 analytics/decision endpoints.
+import api.p0_routes  # noqa: F401,E402
 
 ROOT = Path(__file__).resolve().parent
 
