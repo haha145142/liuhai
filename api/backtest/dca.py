@@ -13,7 +13,7 @@ try:
 except Exception:  # pragma: no cover
     psycopg = None
 
-app = FastAPI(title="Fund Watch DCA Backtest", version="1.0.1")
+app = FastAPI(title="Fund Watch DCA Backtest", version="1.0.2")
 
 
 def _rows(fund_code: str) -> list[dict[str, Any]]:
@@ -42,12 +42,14 @@ def _infer_fund_code(start_nav: float | None) -> str | None:
     try:
         with psycopg.connect(url, connect_timeout=4) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT fund_code FROM fund_info WHERE nav IS NOT NULL AND ABS(nav - %s) < 0.0000005 LIMIT 1",
-                    (start_nav,),
-                )
-                row = cur.fetchone()
-                return str(row[0]) if row else None
+                cur.execute("SELECT fund_code,nav FROM fund_info WHERE nav IS NOT NULL")
+                rows = cur.fetchall()
+        if not rows:
+            return None
+        nearest = min(rows, key=lambda r: abs(float(r[1]) - start_nav))
+        nearest_nav = float(nearest[1])
+        relative_gap = abs(nearest_nav - start_nav) / max(abs(nearest_nav), 1e-9)
+        return str(nearest[0]) if relative_gap <= 0.01 else None
     except Exception:
         return None
 
