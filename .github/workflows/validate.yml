@@ -19,19 +19,17 @@ jobs:
           python-version: '3.12'
 
       - name: Python syntax
-        run: python -m compileall -q api core main.py
+        run: python -m compileall -q api core
 
       - name: Required files
         shell: bash
         run: |
           set -euo pipefail
-          test -f main.py
           test -f api/index.py
           test -f index.html
           test -f app-v2.js
           test -f styles.css
           test -f vercel.json
-          test -f sql/init.postgres.sql
 
       - name: JavaScript syntax
         run: node --check app-v2.js
