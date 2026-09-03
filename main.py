@@ -14,9 +14,7 @@ from api.index import app
 
 ROOT = Path(__file__).resolve().parent
 
-# Keep API routes first; the frontend mount only handles otherwise-unmatched
-# paths. Static files are explicitly served from the project root through the
-# FastAPI mount so the single-function deployment remains self-contained.
+# Static assets live at repository root. API routes remain owned by FastAPI.
 app.mount(
     "/static",
     StaticFiles(directory=str(ROOT), check_dir=False),
@@ -29,7 +27,7 @@ def frontend_index():
 
 @app.get("/styles.css", include_in_schema=False)
 def frontend_styles():
-    return FileResponse(ROOT / "styles-v2.css", media_type="text/css")
+    return FileResponse(ROOT / "styles.css", media_type="text/css")
 
 @app.get("/app-v2.js", include_in_schema=False)
 def frontend_app():
