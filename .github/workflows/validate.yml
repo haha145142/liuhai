@@ -1,0 +1,40 @@
+name: Fund Watch Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python syntax
+        run: python -m compileall -q api core main.py
+
+      - name: Required files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f main.py
+          test -f api/index.py
+          test -f index.html
+          test -f app-v2.js
+          test -f styles.css
+          test -f vercel.json
+          test -f sql/init.postgres.sql
+
+      - name: JavaScript syntax
+        run: node --check app-v2.js
+
+      - name: Vercel config JSON
+        run: python -m json.tool vercel.json >/dev/null
