@@ -6,6 +6,9 @@
       "excludeFiles": "{tests/**,**/test_*.py,backend/**/test*.py,sql/**,docs/**}"
     }
   },
+  "routes": [
+    {"src": "/api/(.*)", "dest": "/api/index.py"}
+  ],
   "headers": [
     {"source":"/api/(.*)","headers":[{"key":"Cache-Control","value":"no-store, max-age=0"}]},
     {"source":"/(.*)","headers":[{"key":"X-Content-Type-Options","value":"nosniff"},{"key":"Referrer-Policy","value":"strict-origin-when-cross-origin"}]}
